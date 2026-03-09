@@ -1,0 +1,94 @@
+import asyncio
+import json
+import os
+
+from swe_pruner_mcp.server import SWEPrunerService, run_rg_search
+
+
+def test_tokenize_query_filters_noise():
+    tokens = SWEPrunerService._tokenize_query(
+        "How is authentication handled in this file and where is the user class defined?"
+    )
+    assert "authentication" in tokens
+    assert "user" in tokens
+    assert "class" in tokens
+    assert "the" not in tokens
+
+
+def test_fallback_prune_keeps_structural_and_keyword_lines(tmp_path):
+    os.environ["STATS_FILE"] = str(tmp_path / "stats.json")
+    service = SWEPrunerService(model_path="/tmp/non-existent")
+    service._model_load_attempted = True
+
+    code = "\n".join(
+        [
+            "import os",
+            "def login(user):",
+            "    token = create_token(user)",
+            "    return token",
+            "",
+            "def other():",
+            "    return 1",
+        ]
+    )
+
+    pruned = service._fallback_prune(code, "How is login token handled")
+    assert "import os" in pruned
+    assert "def login(user):" in pruned
+    assert "token = create_token(user)" in pruned
+
+
+def test_prune_without_query_returns_full_content(tmp_path):
+    os.environ["STATS_FILE"] = str(tmp_path / "stats.json")
+    service = SWEPrunerService(model_path="/tmp/non-existent")
+    service._model_load_attempted = True
+
+    code = "line1\nline2"
+    result, metadata = asyncio.run(service.prune(code, query=None))
+
+    assert result == code
+    assert metadata["pruned"] is False
+    assert metadata["reason"] == "No query provided"
+
+
+def test_prune_with_query_uses_heuristic_when_model_unavailable(tmp_path):
+    os.environ["STATS_FILE"] = str(tmp_path / "stats.json")
+    service = SWEPrunerService(model_path="/tmp/non-existent")
+    service._model_load_attempted = True
+
+    code = "\n".join(["def auth():", "    verify_token()", "    return True", "def noop():", "    pass"])
+    result, metadata = asyncio.run(service.prune(code, query="token auth"))
+
+    assert metadata["pruned"] is True
+    assert metadata["backend"] == "heuristic"
+    assert "verify_token" in result
+
+
+def test_prune_writes_stats_file_with_compression_ratio(tmp_path):
+    stats_file = tmp_path / "stats.json"
+    os.environ["STATS_FILE"] = str(stats_file)
+    service = SWEPrunerService(model_path="/tmp/non-existent")
+    service._model_load_attempted = True
+
+    code = "\n".join(["def auth():", "    verify_token()", "    return True", "def noop():", "    pass"])
+    _, _ = asyncio.run(service.prune(code, query="auth token"))
+
+    assert stats_file.exists()
+    entries = json.loads(stats_file.read_text())
+    assert len(entries) >= 1
+    assert entries[-1]["operation"] == "prune"
+    assert "compression_ratio" in entries[-1]
+
+
+def test_run_rg_search_returns_matches(tmp_path):
+    sample = tmp_path / "a.py"
+    sample.write_text("def login_user():\n    return 1\n", encoding="utf-8")
+    output = run_rg_search("login_user", str(tmp_path), 100)
+    assert "login_user" in output
+
+
+def test_run_rg_search_returns_no_match_message(tmp_path):
+    sample = tmp_path / "a.py"
+    sample.write_text("def login_user():\n    return 1\n", encoding="utf-8")
+    output = run_rg_search("does_not_exist_123", str(tmp_path), 100)
+    assert "No matches found for pattern" in output
