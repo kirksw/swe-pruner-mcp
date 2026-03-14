@@ -4,11 +4,9 @@ import re
 import sys
 import logging
 import subprocess
+import asyncio
 from pathlib import Path
 from typing import Any
-
-import torch
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 from mcp.server.lowlevel import Server
 from mcp.types import TextContent
@@ -22,6 +20,10 @@ logging.basicConfig(
     stream=sys.stderr,
 )
 logger = logging.getLogger(__name__)
+
+torch = None
+AutoTokenizer = None
+AutoModelForSequenceClassification = None
 
 
 def run_rg_search(pattern: str, search_root: str, max_matches: int) -> str:
@@ -65,6 +67,8 @@ class SWEPrunerService:
     def _load_model(self):
         """Load SWE-Pruner model from HuggingFace or local path."""
         try:
+            self._ensure_model_dependencies()
+
             if self.model_path and Path(self.model_path).exists():
                 logger.info(f"Loading model from local path: {self.model_path}")
                 model_name = self.model_path
@@ -83,6 +87,21 @@ class SWEPrunerService:
         except Exception as e:
             logger.error(f"Failed to load model: {e}")
             logger.warning("Will operate in heuristic fallback mode (no model scoring)")
+
+    @staticmethod
+    def _ensure_model_dependencies():
+        """Import model dependencies lazily so heuristic mode still works."""
+        global torch, AutoTokenizer, AutoModelForSequenceClassification
+        if torch is not None and AutoTokenizer is not None and AutoModelForSequenceClassification is not None:
+            return
+
+        import torch as torch_module
+        from transformers import AutoModelForSequenceClassification as auto_model
+        from transformers import AutoTokenizer as auto_tokenizer
+
+        torch = torch_module
+        AutoTokenizer = auto_tokenizer
+        AutoModelForSequenceClassification = auto_model
 
     def _ensure_model_loaded(self):
         """Attempt model loading once per process."""
@@ -414,8 +433,8 @@ def create_server():
     return app
 
 
-async def main():
-    """Main entry point for MCP server"""
+async def async_main():
+    """Async entry point for MCP server."""
     from mcp.server.stdio import stdio_server
 
     app = create_server()
@@ -428,6 +447,10 @@ async def main():
         await app.run(streams[0], streams[1], app.create_initialization_options())
 
 
+def main():
+    """Synchronous console entry point."""
+    asyncio.run(async_main())
+
+
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    main()

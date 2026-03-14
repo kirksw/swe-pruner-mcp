@@ -1,7 +1,10 @@
 import asyncio
 import json
 import os
+from inspect import iscoroutine
+from unittest.mock import patch
 
+from swe_pruner_mcp import server
 from swe_pruner_mcp.server import SWEPrunerService, run_rg_search
 
 
@@ -56,8 +59,27 @@ def test_prune_with_query_uses_heuristic_when_model_unavailable(tmp_path):
     service = SWEPrunerService(model_path="/tmp/non-existent")
     service._model_load_attempted = True
 
-    code = "\n".join(["def auth():", "    verify_token()", "    return True", "def noop():", "    pass"])
+    code = "\n".join(
+        ["def auth():", "    verify_token()", "    return True", "def noop():", "    pass"]
+    )
     result, metadata = asyncio.run(service.prune(code, query="token auth"))
+
+    assert metadata["pruned"] is True
+    assert metadata["backend"] == "heuristic"
+    assert "verify_token" in result
+
+
+def test_prune_falls_back_when_model_dependencies_fail(tmp_path):
+    os.environ["STATS_FILE"] = str(tmp_path / "stats.json")
+    service = SWEPrunerService(model_path="/tmp/non-existent")
+
+    with patch.object(service, "_ensure_model_dependencies", side_effect=ImportError("missing deps")):
+        result, metadata = asyncio.run(
+            service.prune(
+                "\n".join(["def auth():", "    verify_token()", "    return True"]),
+                query="token auth",
+            )
+        )
 
     assert metadata["pruned"] is True
     assert metadata["backend"] == "heuristic"
@@ -70,7 +92,9 @@ def test_prune_writes_stats_file_with_compression_ratio(tmp_path):
     service = SWEPrunerService(model_path="/tmp/non-existent")
     service._model_load_attempted = True
 
-    code = "\n".join(["def auth():", "    verify_token()", "    return True", "def noop():", "    pass"])
+    code = "\n".join(
+        ["def auth():", "    verify_token()", "    return True", "def noop():", "    pass"]
+    )
     _, _ = asyncio.run(service.prune(code, query="auth token"))
 
     assert stats_file.exists()
@@ -92,3 +116,17 @@ def test_run_rg_search_returns_no_match_message(tmp_path):
     sample.write_text("def login_user():\n    return 1\n", encoding="utf-8")
     output = run_rg_search("does_not_exist_123", str(tmp_path), 100)
     assert "No matches found for pattern" in output
+
+
+def test_main_wraps_async_entrypoint():
+    with (
+        patch.object(server.asyncio, "run") as run_mock,
+        patch.object(server, "async_main") as async_main_mock,
+    ):
+        server.main()
+
+    async_main_mock.assert_called_once_with()
+    run_mock.assert_called_once()
+    coroutine = run_mock.call_args.args[0]
+    assert iscoroutine(coroutine)
+    coroutine.close()
