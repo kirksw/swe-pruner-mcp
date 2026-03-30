@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 torch = None
 AutoTokenizer = None
 AutoModelForSequenceClassification = None
+NO_MATCH_PREFIX = "No matches found for pattern: "
 
 
 def run_rg_search(pattern: str, search_root: str, max_matches: int) -> str:
@@ -49,6 +50,46 @@ def run_rg_search(pattern: str, search_root: str, max_matches: int) -> str:
     if result.stdout:
         return result.stdout
     return f"No matches found for pattern: {pattern}"
+
+
+async def run_rg_search_async(
+    pattern: str,
+    search_root: str,
+    max_matches: int,
+    timeout_seconds: float,
+) -> str:
+    """Run ripgrep off the event loop with a hard async timeout."""
+    return await asyncio.wait_for(
+        asyncio.to_thread(run_rg_search, pattern, search_root, max_matches),
+        timeout=timeout_seconds,
+    )
+
+
+async def prune_with_timeout(
+    pruner: "SWEPrunerService",
+    code: str,
+    query: str | None,
+    timeout_seconds: float,
+) -> tuple[str, dict[str, Any]]:
+    """Bound pruning time so the MCP call does not wait indefinitely."""
+    return await asyncio.wait_for(pruner.prune(code, query), timeout=timeout_seconds)
+
+
+async def prune_search_output(
+    pruner: "SWEPrunerService",
+    output: str,
+    query: str | None,
+    timeout_seconds: float,
+) -> tuple[str, dict[str, Any]]:
+    """Return no-match search output immediately, otherwise prune it."""
+    if output.startswith(NO_MATCH_PREFIX):
+        return output, {
+            "pruned": False,
+            "tokens": len(output),
+            "reason": "No matches found",
+        }
+
+    return await prune_with_timeout(pruner, output, query, timeout_seconds)
 
 
 class SWEPrunerService:
@@ -333,6 +374,7 @@ def create_server():
             raise ValueError("Missing required argument: file_path")
 
         context_focus_question = arguments.get("context_focus_question")
+        prune_timeout_seconds = float(os.getenv("PRUNE_TIMEOUT_SECONDS", "30"))
 
         try:
             path = Path(file_path).expanduser()
@@ -355,7 +397,12 @@ def create_server():
                 ]
 
             content = path.read_text(encoding="utf-8", errors="ignore")
-            result, metadata = await pruner.prune(content, context_focus_question)
+            result, metadata = await prune_with_timeout(
+                pruner,
+                content,
+                context_focus_question,
+                prune_timeout_seconds,
+            )
 
             result_text = f"/* Tokens: {metadata['tokens']}"
             if metadata.get("pruned"):
@@ -364,6 +411,8 @@ def create_server():
 
             return [TextContent(type="text", text=result_text)]
 
+        except asyncio.TimeoutError:
+            return [TextContent(type="text", text="Error: Pruning timed out")]
         except Exception as e:
             logger.error(f"Error in read_pruned: {e}")
             return [TextContent(type="text", text=f"Error: {str(e)}")]
@@ -383,9 +432,21 @@ def create_server():
         try:
             search_root = os.getenv("SEARCH_ROOT", ".")
             max_matches = int(os.getenv("MAX_SEARCH_MATCHES", "1000"))
-            output = run_rg_search(pattern, search_root, max_matches)
+            search_timeout_seconds = float(os.getenv("SEARCH_TIMEOUT_SECONDS", "30"))
+            prune_timeout_seconds = float(os.getenv("PRUNE_TIMEOUT_SECONDS", "30"))
+            output = await run_rg_search_async(
+                pattern,
+                search_root,
+                max_matches,
+                search_timeout_seconds,
+            )
 
-            result, metadata = await pruner.prune(output, context_focus_question)
+            result, metadata = await prune_search_output(
+                pruner,
+                output,
+                context_focus_question,
+                prune_timeout_seconds,
+            )
 
             result_text = f"/* Tokens: {metadata['tokens']}"
             if metadata.get("pruned"):
@@ -394,6 +455,8 @@ def create_server():
 
             return [TextContent(type="text", text=result_text)]
 
+        except asyncio.TimeoutError:
+            return [TextContent(type="text", text="Error: Search or pruning timed out")]
         except FileNotFoundError:
             return [TextContent(type="text", text="Error: `rg` is not available in PATH")]
         except subprocess.TimeoutExpired:

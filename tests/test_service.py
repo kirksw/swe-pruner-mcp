@@ -5,7 +5,14 @@ from inspect import iscoroutine
 from unittest.mock import patch
 
 from swe_pruner_mcp import server
-from swe_pruner_mcp.server import SWEPrunerService, run_rg_search
+from swe_pruner_mcp.server import (
+    NO_MATCH_PREFIX,
+    SWEPrunerService,
+    prune_search_output,
+    prune_with_timeout,
+    run_rg_search,
+    run_rg_search_async,
+)
 
 
 def test_tokenize_query_filters_noise():
@@ -189,6 +196,49 @@ def test_run_rg_search_returns_no_match_message(tmp_path):
     sample.write_text("def login_user():\n    return 1\n", encoding="utf-8")
     output = run_rg_search("does_not_exist_123", str(tmp_path), 100)
     assert "No matches found for pattern" in output
+
+
+def test_run_rg_search_async_times_out():
+    async def fake_to_thread(*args, **kwargs):
+        await asyncio.sleep(0.05)
+        return "done"
+
+    with patch.object(server.asyncio, "to_thread", side_effect=fake_to_thread):
+        try:
+            asyncio.run(run_rg_search_async("pattern", ".", 10, timeout_seconds=0.01))
+            assert False, "expected timeout"
+        except TimeoutError:
+            pass
+
+
+def test_prune_with_timeout_times_out(tmp_path):
+    os.environ["STATS_FILE"] = str(tmp_path / "stats.json")
+    service = SWEPrunerService(model_path="/tmp/non-existent")
+
+    async def fake_prune(code, query):
+        await asyncio.sleep(0.05)
+        return code, {"tokens": len(code)}
+
+    with patch.object(service, "prune", side_effect=fake_prune):
+        try:
+            asyncio.run(prune_with_timeout(service, "code", "query", timeout_seconds=0.01))
+            assert False, "expected timeout"
+        except TimeoutError:
+            pass
+
+
+def test_prune_search_output_no_match_bypasses_prune(tmp_path):
+    os.environ["STATS_FILE"] = str(tmp_path / "stats.json")
+    service = SWEPrunerService(model_path="/tmp/non-existent")
+
+    with patch.object(service, "prune", side_effect=AssertionError("should not prune")):
+        result, metadata = asyncio.run(
+            prune_search_output(service, f"{NO_MATCH_PREFIX}needle", "where", timeout_seconds=0.01)
+        )
+
+    assert result == f"{NO_MATCH_PREFIX}needle"
+    assert metadata["pruned"] is False
+    assert metadata["reason"] == "No matches found"
 
 
 def test_main_wraps_async_entrypoint():
