@@ -57,6 +57,13 @@ class SWEPrunerService:
     def __init__(self, model_path: str | None = None):
         """Initialize pruner service."""
         self.model_path = model_path or os.getenv("MODEL_PATH")
+        self.allow_remote_model_download = os.getenv("ALLOW_REMOTE_MODEL_DOWNLOAD", "").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        self.remote_model_name = os.getenv("REMOTE_MODEL_NAME", "ayanami-kitasan/code-pruner")
         self.stats_file = os.getenv("STATS_FILE")
         self.logger = PrunerLogger(self.stats_file)
 
@@ -64,17 +71,31 @@ class SWEPrunerService:
         self.model = None
         self._model_load_attempted = False
 
+    def _resolve_model_name(self) -> str | None:
+        """Resolve the model source to use, or None for heuristic-only mode."""
+        if self.model_path:
+            expanded_model_path = Path(self.model_path).expanduser()
+            if expanded_model_path.exists():
+                logger.info(f"Loading model from local path: {expanded_model_path}")
+                return str(expanded_model_path)
+
+            logger.warning(f"MODEL_PATH does not exist: {expanded_model_path}")
+
+        if not self.allow_remote_model_download:
+            logger.info("Remote model download disabled; using heuristic fallback")
+            return None
+
+        logger.info(f"Loading model from HuggingFace: {self.remote_model_name}")
+        return self.remote_model_name
+
     def _load_model(self):
         """Load SWE-Pruner model from HuggingFace or local path."""
         try:
-            self._ensure_model_dependencies()
+            model_name = self._resolve_model_name()
+            if model_name is None:
+                return
 
-            if self.model_path and Path(self.model_path).exists():
-                logger.info(f"Loading model from local path: {self.model_path}")
-                model_name = self.model_path
-            else:
-                logger.info("Loading model from HuggingFace: ayanami-kitasan/code-pruner")
-                model_name = "ayanami-kitasan/code-pruner"
+            self._ensure_model_dependencies()
 
             logger.info("Loading tokenizer...")
             self.tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -323,7 +344,7 @@ def create_server():
                     )
                 ]
 
-            max_file_bytes = int(os.getenv("MAX_FILE_BYTES", "2000000"))
+            max_file_bytes = int(os.getenv("MAX_FILE_BYTES", "5000000"))
             if path.stat().st_size > max_file_bytes:
                 return [
                     TextContent(

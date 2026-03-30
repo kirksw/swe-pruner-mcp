@@ -86,6 +86,79 @@ def test_prune_falls_back_when_model_dependencies_fail(tmp_path):
     assert "verify_token" in result
 
 
+def test_prune_does_not_attempt_remote_download_by_default(tmp_path):
+    with patch.dict(
+        os.environ,
+        {
+            "STATS_FILE": str(tmp_path / "stats.json"),
+            "ALLOW_REMOTE_MODEL_DOWNLOAD": "",
+        },
+        clear=False,
+    ):
+        service = SWEPrunerService()
+
+        with patch.object(service, "_ensure_model_dependencies") as deps_mock:
+            result, metadata = asyncio.run(
+                service.prune(
+                    "\n".join(["def auth():", "    verify_token()", "    return True"]),
+                    query="token auth",
+                )
+            )
+
+    deps_mock.assert_not_called()
+    assert metadata["pruned"] is True
+    assert metadata["backend"] == "heuristic"
+    assert "verify_token" in result
+
+
+def test_prune_can_attempt_remote_download_when_enabled(tmp_path):
+    with patch.dict(
+        os.environ,
+        {
+            "STATS_FILE": str(tmp_path / "stats.json"),
+            "ALLOW_REMOTE_MODEL_DOWNLOAD": "1",
+        },
+        clear=False,
+    ):
+        service = SWEPrunerService()
+
+        with patch.object(
+            service,
+            "_ensure_model_dependencies",
+            side_effect=ImportError("missing deps"),
+        ) as deps_mock:
+            result, metadata = asyncio.run(
+                service.prune(
+                    "\n".join(["def auth():", "    verify_token()", "    return True"]),
+                    query="token auth",
+                )
+            )
+
+    deps_mock.assert_called_once()
+    assert metadata["pruned"] is True
+    assert metadata["backend"] == "heuristic"
+    assert "verify_token" in result
+
+
+def test_prune_survives_stats_logging_failures(tmp_path):
+    os.environ["STATS_FILE"] = str(tmp_path / "stats.json")
+    service = SWEPrunerService(model_path="/tmp/non-existent")
+    service._model_load_attempted = True
+
+    with patch.object(service.logger, "_write_stats", side_effect=PermissionError("no write")):
+        result, metadata = asyncio.run(
+            service.prune(
+                "\n".join(["def auth():", "    verify_token()", "    return True"]),
+                query="token auth",
+            )
+        )
+
+    assert metadata["pruned"] is True
+    assert metadata["backend"] == "heuristic"
+    assert "verify_token" in result
+    assert service.logger.enabled is False
+
+
 def test_prune_writes_stats_file_with_compression_ratio(tmp_path):
     stats_file = tmp_path / "stats.json"
     os.environ["STATS_FILE"] = str(stats_file)

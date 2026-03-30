@@ -10,13 +10,17 @@ class PrunerLogger:
 
     def __init__(self, stats_path: str | None = None):
         """Initialize logger with stats file path"""
+        self.enabled = True
         if stats_path is None:
             cache_dir = Path.home() / ".cache" / "swe-pruner"
             cache_dir.mkdir(parents=True, exist_ok=True)
             self.stats_path = str(cache_dir / "stats.json")
         else:
             self.stats_path = str(stats_path)
-        self._ensure_stats_file()
+        try:
+            self._ensure_stats_file()
+        except OSError:
+            self.enabled = False
 
     def _ensure_stats_file(self):
         """Ensure stats file exists with valid JSON array"""
@@ -53,6 +57,9 @@ class PrunerLogger:
         metadata: dict[str, Any] | None = None,
     ):
         """Log a pruning operation to the stats file"""
+        if not self.enabled:
+            return
+
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "operation": operation,
@@ -63,6 +70,9 @@ class PrunerLogger:
             "error": error,
             "metadata": metadata or {},
         }
-        stats = self._read_stats()
-        stats.append(entry)
-        self._write_stats(stats)
+        try:
+            stats = self._read_stats()
+            stats.append(entry)
+            self._write_stats(stats)
+        except OSError:
+            self.enabled = False

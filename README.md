@@ -19,7 +19,7 @@ homeModules.swePrunerMcp.enable = true;
 ns
 ```
 
-At runtime, the server will try to load a model from `MODEL_PATH` if it exists. If no model is available, it falls back to heuristic pruning and still returns useful output.
+At runtime, the server loads a model from `MODEL_PATH` if it exists. If no local model is available, it falls back to heuristic pruning and still returns useful output. Remote Hugging Face downloads are disabled by default; set `ALLOW_REMOTE_MODEL_DOWNLOAD=1` to opt in.
 
 ## Usage
 
@@ -32,6 +32,8 @@ Read a file with optional context-aware pruning.
 **Parameters:**
 - `file_path` (required): Path to the file to read
 - `context_focus_question` (optional): Question to guide pruning. Only code relevant to this question will be returned.
+
+By default, `read_pruned` accepts files up to `5,000,000` bytes. Override with `MAX_FILE_BYTES` if needed.
 
 **Examples:**
 ```bash
@@ -70,8 +72,9 @@ search_pruned(
 1. **No Query**: returns full content.
 2. **With Query + Model Available**: uses model-backed line relevance scoring.
 3. **With Query + No Model**: uses heuristic pruning fallback.
-4. **Fallback Behavior**: if pruning fails, full content is returned automatically.
-4. **Statistics**: All operations logged to `$HOME/.cache/swe-pruner/stats.json`
+4. **Remote Download Disabled**: if `MODEL_PATH` is unset or missing, the server stays in heuristic mode unless `ALLOW_REMOTE_MODEL_DOWNLOAD=1`.
+5. **Fallback Behavior**: if pruning fails, full content is returned automatically.
+6. **Statistics**: All operations logged to `$HOME/.cache/swe-pruner/stats.json` when writable
 
 ## Performance
 
@@ -114,6 +117,11 @@ Check if model path is correct:
 ```bash
 echo $MODEL_PATH
 ls -la $MODEL_PATH
+```
+
+If you want the server to try Hugging Face when no local model exists:
+```bash
+export ALLOW_REMOTE_MODEL_DOWNLOAD=1
 ```
 
 ### Tools Not Found in Opencode
